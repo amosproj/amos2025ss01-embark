@@ -4,14 +4,49 @@ from concurrent.futures import ThreadPoolExecutor
 
 import paramiko
 
+from django.shortcuts import render
 from django.contrib.auth.decorators import login_required, permission_required
 from django.contrib.auth import get_user
 from django.views.decorators.http import require_http_methods
 from django.conf import settings
-from django.http import JsonResponse
+from django.http import JsonResponse, HttpResponseRedirect
+from django.contrib import messages
 
 from workers.models import Worker
 from users.models import Configuration
+
+
+@require_http_methods(["GET"])
+@login_required(login_url='/' + settings.LOGIN_URL)
+@permission_required("users.worker_permission", login_url='/')
+def worker_main(request):
+    """
+    Main view for the workers page.
+    """
+    user = get_user(request)
+    configs = Configuration.objects.prefetch_related('workers').all()
+    configs = configs.filter(user=user)
+    configs = sorted(configs, key=lambda x: x.created_at, reverse=True)
+
+    for config in configs:
+        config.total_workers = config.workers.count()
+        config.reachable_workers = config.workers.filter(reachable=True).count()
+
+    reachable_workers = Worker.objects.filter(configurations__in=configs, reachable=True).distinct()
+    unreachable_workers = Worker.objects.filter(configurations__in=configs, reachable=False).distinct()
+
+    reachable_workers = sorted(reachable_workers, key=lambda x: x.ip_address)
+    unreachable_workers = sorted(unreachable_workers, key=lambda x: x.ip_address)
+
+    workers = reachable_workers + unreachable_workers
+    for worker in workers:
+        worker.config_ids = ', '.join([str(config.id) for config in worker.configurations.all()])
+
+    return render(request, 'workers/index.html', {
+        'user': user,
+        'configs': configs,
+        'workers': workers,
+    })
 
 
 @require_http_methods(["GET"])
@@ -40,27 +75,44 @@ def config_worker_scan(request, configuration_id):
     def connect_ssh(ip_address, port=22, timeout=1):
         try:
             with socket.create_connection((str(ip_address), port), timeout):
+                # TODO: maybe we can already gather the system info for each worker here
+                # rather than doing so manually in the connect_worker function
                 try:
                     existing_worker = Worker.objects.get(ip_address=str(ip_address))
+                    existing_worker.reachable = True
+                    existing_worker.save()
                     if configuration not in existing_worker.configurations.all():
                         existing_worker.configurations.add(configuration)
                         existing_worker.save()
                 except Worker.DoesNotExist:
                     new_worker = Worker(
-                        configurations=[configuration],
                         name=f"worker-{str(ip_address)}",
                         ip_address=str(ip_address),
-                        system_info={}
+                        system_info={},
+                        reachable=True
                     )
                     new_worker.save()
+                    new_worker.configurations.set([configuration])
                 return str(ip_address)
-        except socket.timeout:
+        except Exception:
             return None
 
     with ThreadPoolExecutor(max_workers=50) as executor:
         reachable = list(filter(None, executor.map(connect_ssh, list(ip_network.hosts()))))
 
-    registered = [worker.ip_address for worker in configuration.workers.all()]
+    # all registered workers that are not reachable should have their reachable flag set to False
+    registered = []
+    for worker in configuration.workers.all():
+        registered.append(worker.ip_address)
+        if worker.ip_address not in reachable:
+            worker.reachable = False
+            worker.save()
+
+    view_access = request.GET.get('view_access')
+    if view_access == "True":
+        messages.success(request, f"Scan complete. {len(reachable)} reachable workers out of {len(registered)} registered workers.")
+        return HttpResponseRedirect(request.META.get('HTTP_REFERER', '/worker/'))
+
     return JsonResponse({'status': 'scan_complete', 'configuration': configuration.name, 'registered_workers': registered, 'reachable_workers': reachable})
 
 
@@ -110,7 +162,7 @@ def connect_worker(request, configuration_id, worker_id):
     # to automatically add the host key to known hosts even though it is flagged as insecure by CodeQL.
     # With the RejectPolicy, we will not be able to connect to the worker if the host key is not already in known hosts
     ssh_client.load_system_host_keys()
-    ssh_client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
     try:
         ssh_client.connect(worker_ip, username=ssh_user, password=ssh_password)
