@@ -2,8 +2,8 @@ import ipaddress
 import socket
 import re
 import os
+import logging
 from concurrent.futures import ThreadPoolExecutor
-
 import paramiko
 
 from django.shortcuts import render
@@ -20,6 +20,8 @@ from workers.models import Worker, Configuration
 from workers.update.update import exec_blocking_ssh
 from workers.update.dependencies import DependencyType, uses_dependency
 from workers.tasks import update_worker, update_system_info
+
+logger = logging.getLogger(__name__)
 
 
 @require_http_methods(["GET"])
@@ -177,15 +179,14 @@ def update_worker_dependency(request, worker_id):
 
         if not _trigger_worker_update(worker, dependency):
             messages.error(request, 'Worker update already queued')
-            return safe_redirect(request, '/worker/')
+        else:
+            messages.success(request, 'Update queued')
+
     except Worker.DoesNotExist:
         messages.error(request, 'Worker does not exist')
-        return safe_redirect(request, '/worker/')
-    except ValueError as exception:
+    except Exception as exception:
         messages.error(request, str(exception))
-        return safe_redirect(request, '/worker/')
 
-    messages.success(request, 'Update queued')
     return safe_redirect(request, '/worker/')
 
 
@@ -352,34 +353,46 @@ def worker_soft_reset(request, worker_id, configuration_id=None):
     :params configuration_id: The configuration id
     """
     try:
-        if not configuration_id and not worker_id:
-            return JsonResponse({'status': 'error', 'message': 'No worker id and no config id given'})
-        if worker_id:
-            user = get_user(request)
-            worker = Worker.objects.get(id=worker_id)
-            if not configuration_id:
-                configuration = worker.configurations.filter(user=user).first()
-            else:
-                configuration = Configuration.objects.get(id=configuration_id)
+        if not worker_id:
+            return JsonResponse({'status': 'error', 'message': 'No worker_id given.'})
+
+        worker = Worker.objects.get(id=worker_id)
+        user = get_user(request)
+
+        if configuration_id:
+            configuration = Configuration.objects.get(id=configuration_id)
             if configuration.user != user:
                 return JsonResponse({'status': 'error', 'message': 'You are not allowed to access this worker.'})
+        else:
+            configuration = worker.configurations.filter(user=user).first()
 
-        ssh_client = None
-        try:
-            ssh_client = worker.ssh_connect(configuration.id)
-            exec_blocking_ssh(ssh_client, "sudo docker ps -aq | xargs -r docker stop | xargs -r docker rm || true")
-            exec_blocking_ssh(ssh_client, f"sudo rm -rf {settings.WORKER_EMBA_LOGS}")
-            exec_blocking_ssh(ssh_client, f"sudo rm -rf {settings.WORKER_FIRMWARE_DIR}")
-            ssh_client.close()
-            return JsonResponse({'status': 'success', 'message': 'Worker soft reset completed.'})
-
-        except (paramiko.SSHException, socket.error):
-            if ssh_client:
-                ssh_client.close()
-            return JsonResponse({'status': 'error', 'message': 'SSH connection failed or command execution failed.'})
+        result = exec_soft_reset_cleanup(worker, configuration.id)
+        return JsonResponse(result)
 
     except (Worker.DoesNotExist, Configuration.DoesNotExist):
         return JsonResponse({'status': 'error', 'message': 'Worker or configuration not found.'})
+    except Exception as exception:
+        logger.error("Unexpected exception: %s", exception)
+        return JsonResponse({'status': 'error', 'message': 'Unexpected exception. Please check logger.'})
+
+
+def exec_soft_reset_cleanup(worker, configuration_id=None):
+    """
+    Connects via SSH to the worker and performs the soft reset
+    :param worker: Worker object to soft reset
+    :param configuration_id: config_id of the worker based on which the worker needs to be reset
+    """
+    try:
+        ssh_client = worker.ssh_connect(configuration_id)
+        exec_blocking_ssh(ssh_client, "sudo docker ps -aq | xargs -r docker stop | xargs -r docker rm || true")
+        exec_blocking_ssh(ssh_client, f"sudo rm -rf {settings.WORKER_EMBA_LOGS}")
+        exec_blocking_ssh(ssh_client, f"sudo rm -rf {settings.WORKER_FIRMWARE_DIR}")
+        exec_blocking_ssh(ssh_client, f"sudo mkdir -p {settings.WORKER_FIRMWARE_DIR}")
+        return {'status': 'success', 'message': 'Worker soft reset completed.'}
+    except (paramiko.SSHException, socket.error):
+        return {'status': 'error', 'message': 'SSH connection failed or command execution failed.'}
+    finally:
+        ssh_client.close()
 
 
 @require_http_methods(["POST"])

@@ -149,7 +149,7 @@ class FirmwareFile(models.Model):
         return f"{settings.MEDIA_ROOT}/{self.pk}"
 
     def __str__(self):
-        return f"{self.file.name.replace('/', ' - ')}"  # this the only sanitizing we do?
+        return f"{self.file.name.replace('/', ' - ')}"
 
 
 @receiver(pre_delete, sender=FirmwareFile)
@@ -162,6 +162,13 @@ def delete_fw_pre_delete_post(sender, instance, **kwargs):
         shutil.rmtree(instance.get_abs_folder_path(), ignore_errors=False, onexc=logger.error("Error when trying to delete %s", instance.get_abs_folder_path()))
     else:
         logger.error("No related FW found for delete request: %s", str(sender))
+    # try:
+    #     if sender.file:
+    #         shutil.rmtree(instance.get_abs_folder_path(), ignore_errors=False)
+    #     else:
+    #         logger.error("No related FW found for delete request: %s", str(sender))
+    # except Exception as exception:
+    #     logger.error("Error when trying to delete %s: %s", instance.get_abs_folder_path(), exception)
 
 
 class Vendor (models.Model):
