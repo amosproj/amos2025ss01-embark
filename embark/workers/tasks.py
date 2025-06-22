@@ -209,8 +209,8 @@ def update_worker(worker_id, dependency_idx):
 
     orchestrator = get_orchestrator()
     try:
-        # TODO: if the the worker is currently processing a job, this job should be cancelled here (or implicitly via remove_worker)
         orchestrator.remove_worker(worker)
+        orchestrator.trigger()
         logger.info("Worker: %s removed from orchestrator", worker.name)
     except ValueError:
         pass
@@ -240,6 +240,7 @@ def update_worker(worker_id, dependency_idx):
             config = worker.configurations.first()
             update_system_info(config, worker)
             orchestrator.add_worker(worker)
+            orchestrator.trigger()
             logger.info("Worker: %s added to orchestrator", worker.name)
         except ValueError:
             logger.error("Worker: %s already exists in orchestrator", worker.name)

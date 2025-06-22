@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import paramiko
 
+from celery.utils.log import get_task_logger
 from django.shortcuts import render
 from django.contrib.auth.decorators import login_required, permission_required
 from django.contrib.auth import get_user
@@ -20,6 +21,10 @@ from workers.models import Worker, Configuration
 from workers.update.update import exec_blocking_ssh
 from workers.update.dependencies import DependencyType, uses_dependency
 from workers.tasks import update_worker, update_system_info
+from workers.orchestrator import get_orchestrator
+
+
+logger = get_task_logger(__name__)
 
 
 @require_http_methods(["GET"])
@@ -76,6 +81,13 @@ def delete_config(request):
             return safe_redirect(request, '/worker/')
 
         workers = Worker.objects.annotate(config_count=Count('configurations')).filter(configurations__id=selected_config_id, config_count=1)
+        orchestrator = get_orchestrator()
+        for worker in workers:
+            try:
+                orchestrator.remove_worker(worker)
+                logger.info("Worker: %s removed from orchestrator", worker.name)
+            except ValueError:
+                logger.error("Worker: %s could not be removed from orchestrator", worker.name)
         workers.delete()
 
         config.delete()
