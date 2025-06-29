@@ -189,7 +189,19 @@ def fetch_dependency_updates():
         version = DependencyVersion()
 
     DOCKER_COMPOSE_URL = "https://raw.githubusercontent.com/e-m-b-a/emba/refs/heads/master/docker-compose.yml"  # pylint: disable=invalid-name
-    EXTERNAL_URL = "https://api.github.com/repos/EMBA-support-repos/{}/commits?per_page=1"  # pylint: disable=invalid-name
+    GH_API_URL = "https://api.github.com/repos/{}/commits?per_page=1"  # pylint: disable=invalid-name
+
+    def _get_head_time(repo):
+        try:
+            response = requests.get(GH_API_URL.format(repo), timeout=30)
+            json_response = response.json()
+
+            return json_response[0]["sha"], json_response[0]["commit"]["author"]["date"]
+        except requests.exceptions.Timeout as exception:
+            logger.error("Update check: Failed. An error occured on contacting GH API: %s", exception)
+        except (requests.exceptions.JSONDecodeError, KeyError):
+            logger.error("Update check: Failed. GH API returned invalid or incomplete json: %s", response.text)
+        return "latest", None
 
     # Fetch EMBA + docker image
     try:
@@ -198,29 +210,21 @@ def fetch_dependency_updates():
 
         if match is None:
             logger.error("Update check: Failed. EMBA docker-compose.yml does not contain image version")
-            version.emba = "ERROR fetching EMBA"
+            version.emba = "latest"
         else:
             version.emba = match.group(1)
+            version.emba_head, _ = _get_head_time("e-m-b-a/emba")
     except requests.exceptions.Timeout as exception:
         logger.error("Update check: Failed. An error occured on contacting GH API for docker-compose.yml: %s", exception)
+        version.emba = "latest"
 
     # Fetch external
-    def _get_head_time(repo):
-        try:
-            response = requests.get(EXTERNAL_URL.format(repo), timeout=30)
-            json_response = response.json()
-
-            return json_response[0]["sha"], json_response[0]["commit"]["author"]["date"]
-        except requests.exceptions.Timeout as exception:
-            logger.error("Update check: Failed. An error occured on contacting GH API: %s", exception)
-        except (requests.exceptions.JSONDecodeError, KeyError):
-            logger.error("Update check: Failed. GH API returned invalid or incomplete json: %s", response.text)
-        return "N/A", None
-
-    version.nvd_head, version.nvd_time = _get_head_time("nvd-json-data-feeds")
-    version.epss_head, version.epss_time = _get_head_time("EPSS-data")
+    version.nvd_head, version.nvd_time = _get_head_time("EMBA-support-repos/nvd-json-data-feeds")
+    version.epss_head, version.epss_time = _get_head_time("EMBA-support-repos/EPSS-data")
 
     # Fetch APT
+    shutil.rmtree(settings.WORKER_UPDATE_CHECK, ignore_errors=True)
+
     log_file = settings.WORKER_SETUP_LOGS.format(timestamp=int(time.time()))
     logger.info("APT dependency update check started. Logs: %s", log_file)
     try:
@@ -237,8 +241,6 @@ def fetch_dependency_updates():
     except BaseException as exception:
         logger.error("Error APT dependency update check: %s. Logs: %s", exception, log_file)
         version.deb_list = {}
-
-    shutil.rmtree(settings.WORKER_UPDATE_CHECK, ignore_errors=True)
 
     # Store in DB
     version.save()

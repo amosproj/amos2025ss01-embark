@@ -8,7 +8,7 @@ from paramiko.client import SSHClient
 from django.conf import settings
 
 from workers.update.dependencies import use_dependency, release_dependency, get_dependency_path, eval_outdated_dependencies
-from workers.models import Worker, Configuration, WorkerUpdate
+from workers.models import Worker, Configuration, WorkerUpdate, DependencyVersion
 from workers.orchestrator import get_orchestrator
 
 logger = logging.getLogger(__name__)
@@ -57,11 +57,35 @@ def _copy_files(client: SSHClient, dependency: WorkerUpdate.DependencyType):
         exec_blocking_ssh(client, f"sudo mv {zip_path_user} {zip_path}")
 
 
-def queue_update(worker: Worker, dependency: WorkerUpdate.DependencyType):
+def _get_available_version(dependency: WorkerUpdate.DependencyType) -> str:
+    """
+    Selects related dependency version of update check
+    :param dependency: The dependency to query
+    :returns: version string, or "latest" if undefined
+    """
+    version = DependencyVersion.objects.first()
+    if not version:
+        version = DependencyVersion()
+
+    match dependency:
+        case WorkerUpdate.DependencyType.REPO:
+            return version.emba_head
+        case WorkerUpdate.DependencyType.DOCKERIMAGE:
+            return version.emba
+        case WorkerUpdate.DependencyType.DEPS:
+            return "cached" if bool(version.deb_list) else "latest"
+        case WorkerUpdate.DependencyType.EXTERNAL:
+            return version.get_external_version()
+        case _:
+            raise ValueError("Invalid dependencyType")
+
+
+def queue_update(worker: Worker, dependency: WorkerUpdate.DependencyType, version=None):
     """
     Adds dependency update to worker update queue
     :param worker: The worker to update
     :param dependency: The dependency to update
+    :param version: The desired version of the dependency
     """
     from workers.tasks import update_worker  # pylint: disable=import-outside-toplevel
 
@@ -69,7 +93,10 @@ def queue_update(worker: Worker, dependency: WorkerUpdate.DependencyType):
         logger.info("Update %s discarded for worker %s", dependency.name, worker.name)
         return
 
-    update = WorkerUpdate(worker=worker, dependency_type=dependency)
+    if version is None:
+        version = _get_available_version(dependency)
+
+    update = WorkerUpdate(worker=worker, dependency_type=dependency, version=version)
     update.save()
 
     logger.info("Update %s queued for worker %s", dependency.name, worker.name)
@@ -127,6 +154,24 @@ def process_update_queue(worker: Worker):
         worker.save()
 
 
+def _is_version_installed(worker: Worker, worker_update: WorkerUpdate):
+    """
+    Checks if desired version is already installed
+    :param worker: The worker to update
+    :param worker_update: The worker update to apply
+    :returns: True if version is already installed
+    """
+    match worker_update.get_type():
+        case WorkerUpdate.DependencyType.REPO:
+            return worker.dependency_version.emba_head == worker_update.version
+        case WorkerUpdate.DependencyType.DOCKERIMAGE:
+            return worker.dependency_version.emba == worker_update.version
+        case WorkerUpdate.DependencyType.DEPS:
+            return False
+        case WorkerUpdate.DependencyType.EXTERNAL:
+            return not worker.dependency_version.is_external_outdated(worker_update.version)
+
+
 def perform_update(worker: Worker, client: SSHClient, worker_update: WorkerUpdate):
     """
     Trigger file copy and installer.sh
@@ -137,10 +182,14 @@ def perform_update(worker: Worker, client: SSHClient, worker_update: WorkerUpdat
     """
     dependency = worker_update.get_type()
 
+    if _is_version_installed(worker, worker_update):
+        logger.info("Skip update of %s on worker %s as already installed", worker_update.get_dependency().name, worker.name)
+        return
+
+    use_dependency(dependency, worker_update.version, worker)
+
     folder_path = f"/root/{dependency.name}"
     zip_path = f"{folder_path}.tar.gz"
-
-    use_dependency(dependency, worker)
 
     try:
         _copy_files(client, dependency)
@@ -192,13 +241,9 @@ def update_dependencies_info(worker: Worker):
     try:
         ssh_client = worker.ssh_connect()
 
-        docker_compose_path = os.path.join(settings.WORKER_EMBA_ROOT, 'docker-compose.yml')
-        emba_version_check = exec_blocking_ssh(ssh_client, f"sudo bash -c 'if test -f {docker_compose_path}; then echo success; fi'")
-        worker.dependency_version.emba = exec_blocking_ssh(ssh_client, f"sudo cat {docker_compose_path} | awk -F: '/image:/ {{print $NF; exit}}'") if emba_version_check == 'success' else "N/A"
-
-        def _fetch_external(external_type):
+        def _get_head_time(folder):
             commit_regex = r".*([0-9a-f]{40})\s(.*\s\+[0-9]{4})"
-            path = os.path.join(settings.WORKER_EMBA_ROOT, external_type)
+            path = os.path.join(settings.WORKER_EMBA_ROOT, folder)
             perform_check = exec_blocking_ssh(ssh_client, f"sudo bash -c 'if test -d {path}; then echo success; fi'")
             if perform_check == 'success':
                 result = exec_blocking_ssh(ssh_client, f"sudo bash -c 'cd {path} && git show --no-patch --format=\"%H %ai\" HEAD'")
@@ -207,8 +252,13 @@ def update_dependencies_info(worker: Worker):
                     return match.group(1), match.group(2)
             return "N/A", None
 
-        worker.dependency_version.nvd_head, worker.dependency_version.nvd_time = _fetch_external("external/nvd-json-data-feeds")
-        worker.dependency_version.epss_head, worker.dependency_version.epss_time = _fetch_external("external/EPSS-data")
+        docker_compose_path = os.path.join(settings.WORKER_EMBA_ROOT, 'docker-compose.yml')
+        emba_version_check = exec_blocking_ssh(ssh_client, f"sudo bash -c 'if test -f {docker_compose_path}; then echo success; fi'")
+        worker.dependency_version.emba = exec_blocking_ssh(ssh_client, f"sudo cat {docker_compose_path} | awk -F: '/image:/ {{print $NF; exit}}'") if emba_version_check == 'success' else "N/A"
+        worker.dependency_version.emba_head, _ = _get_head_time("")
+
+        worker.dependency_version.nvd_head, worker.dependency_version.nvd_time = _get_head_time("external/nvd-json-data-feeds")
+        worker.dependency_version.epss_head, worker.dependency_version.epss_time = _get_head_time("external/EPSS-data")
 
         deb_check = exec_blocking_ssh(ssh_client, "sudo bash -c 'if test -d /root/DEPS/pkg; then echo 'success'; fi'")
         deb_list_str = exec_blocking_ssh(ssh_client, "sudo bash -c 'cd /root/DEPS/pkg && sha256sum *.deb'") if deb_check == 'success' else ""

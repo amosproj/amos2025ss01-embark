@@ -23,6 +23,7 @@ def default_deb_list():
 
 class WorkerDependencyVersion(models.Model):
     emba = models.CharField(max_length=100, null=True)
+    emba_head = models.CharField(max_length=40, null=True)
     nvd_head = models.CharField(max_length=40, null=True)
     nvd_time = models.DateTimeField(null=True)
     epss_head = models.CharField(max_length=40, null=True)
@@ -33,6 +34,14 @@ class WorkerDependencyVersion(models.Model):
     emba_outdated = models.BooleanField(default=True)
     external_outdated = models.BooleanField(default=True)
     deb_outdated = models.BooleanField(default=True)
+
+    def get_external_version(self):
+        return f"{self.nvd_head},{self.epss_head}"
+
+    def is_external_outdated(self, version: str):
+        nvd_head, epss_head = version.split(',')
+
+        return nvd_head != self.nvd_head or epss_head != self.epss_head
 
 
 class Worker(models.Model):
@@ -94,6 +103,7 @@ class WorkerUpdate(models.Model):
         DOCKERIMAGE = "DO", _("DOCKER IMAGE")
 
     dependency_type = models.CharField(max_length=2, choices=DependencyType)
+    version = models.CharField(max_length=100, default="latest")
     worker = models.ForeignKey(Worker, on_delete=models.CASCADE)
 
     def get_type(self):
@@ -101,9 +111,39 @@ class WorkerUpdate(models.Model):
 
 
 class DependencyVersion(models.Model):
-    emba = models.CharField(max_length=100, null=True)
-    nvd_head = models.CharField(max_length=40, null=True)
+    """
+    Available dependency version according to update check.
+    This version is not necesserily cached
+    """
+    emba = models.CharField(max_length=100, default="latest")
+    emba_head = models.CharField(max_length=40, default="latest")
+    nvd_head = models.CharField(max_length=40, default="latest")
     nvd_time = models.DateTimeField(null=True)
-    epss_head = models.CharField(max_length=40, null=True)
+    epss_head = models.CharField(max_length=40, default="latest")
     epss_time = models.DateTimeField(null=True)
     deb_list = models.JSONField(default=default_deb_list)
+
+    def get_external_version(self):
+        return f"{self.nvd_head},{self.epss_head}"
+
+
+class CachedDependencyVersion(models.Model):
+    """
+    Cached dependency versions available for download on worker nodes
+    """
+    emba = models.CharField(max_length=100, default="latest")
+    emba_history = models.JSONField()
+    emba_head = models.CharField(max_length=40, default="latest")
+    emba_head_history = models.JSONField()
+    nvd_head = models.CharField(max_length=40, default="latest")
+    nvd_history = models.JSONField()
+    epss_head = models.CharField(max_length=40, default="latest")
+    epss_history = models.JSONField()
+
+    def get_external_version(self):
+        return f"{self.nvd_head},{self.epss_head}"
+
+    def is_external_outdated(self, version: str):
+        nvd_head, epss_head = version.split(',')
+
+        return nvd_head != self.nvd_head or epss_head != self.epss_head
