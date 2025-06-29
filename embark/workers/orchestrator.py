@@ -132,8 +132,7 @@ class Orchestrator:
 
     def release_worker(self, worker: Worker):
         """
-        Release a busy worker from its current task. If there are tasks in the queue,
-        the next task is assigned to the worker. If no tasks are queued, the worker is marked as free.
+        Release a busy worker from its current task and mark it as free.
 
         :param worker: The worker to be released
         :raises ValueError: If the worker is not busy
@@ -142,16 +141,10 @@ class Orchestrator:
             if worker.ip_address not in self.busy_workers:
                 raise ValueError(f"Worker with IP {worker.ip_address} is not busy.")
 
-            if self.tasks:
-                next_task = self.tasks.popleft()
-                self.free_workers[worker.ip_address] = worker
-                del self.busy_workers[worker.ip_address]
-                self._assign_worker(worker, next_task)
-            else:
-                self.free_workers[worker.ip_address] = worker
-                del self.busy_workers[worker.ip_address]
-                worker.analysis_id = None
-                worker.save()
+            del self.busy_workers[worker.ip_address]
+            self.free_workers[worker.ip_address] = worker
+            worker.analysis_id = None
+            worker.save()
 
     def add_worker(self, worker: Worker):
         """

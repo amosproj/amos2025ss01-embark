@@ -1,8 +1,8 @@
 import ipaddress
 import socket
 import re
+import logging
 from concurrent.futures import ThreadPoolExecutor
-
 import paramiko
 
 from django.shortcuts import render
@@ -18,6 +18,8 @@ from django.db.models import Count
 from workers.models import Worker, Configuration, WorkerDependencyVersion, DependencyVersion, WorkerUpdate
 from workers.update.update import init_sudoers_file, queue_update
 from workers.tasks import update_system_info, fetch_dependency_updates, worker_hard_reset_task, worker_soft_reset_task, undo_sudoers_file
+
+logger = logging.getLogger(__name__)
 
 
 @require_http_methods(["GET"])
@@ -59,8 +61,8 @@ def worker_main(request):
     })
 
 
-@require_http_methods(["POST"])
 @login_required(login_url='/' + settings.LOGIN_URL)
+@require_http_methods(["POST"])
 @permission_required("users.worker_permission", login_url='/')
 def delete_config(request):
     """
@@ -186,15 +188,16 @@ def update_worker_dependency(request, worker_id):
     try:
         worker = Worker.objects.get(id=worker_id)
 
-        _trigger_worker_update(worker, dependency)
+        if not _trigger_worker_update(worker, dependency):
+            messages.error(request, 'Worker update already queued')
+        else:
+            messages.success(request, 'Update queued')
+
     except Worker.DoesNotExist:
         messages.error(request, 'Worker does not exist')
-        return safe_redirect(request, '/worker/')
-    except ValueError as exception:
+    except Exception as exception:
         messages.error(request, str(exception))
-        return safe_redirect(request, '/worker/')
 
-    messages.success(request, 'Update queued')
     return safe_redirect(request, '/worker/')
 
 
