@@ -69,6 +69,7 @@ class Worker(models.Model):
     reachable = models.BooleanField(default=False)
     status = models.CharField(max_length=1, choices=ConfigStatus, default=ConfigStatus.UNCONFIGURED)
     analysis_id = models.UUIDField(blank=True, null=True, help_text="ID of the analysis currently running on this worker")
+    last_reached = models.DateTimeField(auto_now_add=True)
 
     dependency_version = models.OneToOneField(
         WorkerDependencyVersion,
@@ -107,6 +108,9 @@ class Worker(models.Model):
                 break
             except (paramiko.SSHException, socket.error):
                 continue
+
+        if ssh_client.get_transport() is None or not ssh_client.get_transport().is_active():
+            raise paramiko.SSHException("Failed to connect to worker with any configuration.")
 
         return ssh_client
 
